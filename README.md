@@ -46,7 +46,7 @@ appliances:
   - name: Oppvaskmaskin
     type: entities
     icon: mdi:dishwasher
-    running: { entity: sensor.oppvaskmaskin_state, state: "on" }
+    running: { entity: binary_sensor.oppvaskmaskin_running, state: "on" }
     phase: sensor.oppvaskmaskin_navaerende_fase
     remaining: sensor.oppvaskmaskin_time_remaining   # minutes
     progress: sensor.oppvaskmaskin_progress          # percent

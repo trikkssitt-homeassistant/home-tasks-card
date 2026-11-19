@@ -53,7 +53,7 @@ export const states = {
   // Home Connect dryer: integration unavailable.
   "sensor.torketrommel_operation_state": { entity_id: "sensor.torketrommel_operation_state", state: "unavailable", attributes: {} },
   // Dishwasher via its own integration + an input_select for "finished, not emptied".
-  "sensor.oppvaskmaskin_state": { entity_id: "sensor.oppvaskmaskin_state", state: "on", attributes: {} },
+  "binary_sensor.oppvaskmaskin_running": { entity_id: "binary_sensor.oppvaskmaskin_running", state: "on", attributes: {} },
   "sensor.oppvaskmaskin_navaerende_fase": { entity_id: "sensor.oppvaskmaskin_navaerende_fase", state: "Skyller", attributes: {} },
   "sensor.oppvaskmaskin_time_remaining": { entity_id: "sensor.oppvaskmaskin_time_remaining", state: "35", attributes: {} },
   "sensor.oppvaskmaskin_progress": { entity_id: "sensor.oppvaskmaskin_progress", state: "70", attributes: {} },
@@ -94,7 +94,7 @@ export const config = {
     {
       name: "Oppvaskmaskin",
       type: "entities",
-      running: { entity: "sensor.oppvaskmaskin_state", state: "on" },
+      running: { entity: "binary_sensor.oppvaskmaskin_running", state: "on" },
       phase: "sensor.oppvaskmaskin_navaerende_fase",
       remaining: "sensor.oppvaskmaskin_time_remaining",
       progress: "sensor.oppvaskmaskin_progress",

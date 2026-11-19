@@ -120,7 +120,7 @@ test("running dishwasher shows phase, finish time and progress", () => {
 
 test("finished dishwasher becomes 'Tøm oppvaskmaskin' with the emptied action", () => {
   const h2 = structuredClone(hass);
-  h2.states["sensor.oppvaskmaskin_state"].state = "off";
+  h2.states["binary_sensor.oppvaskmaskin_running"].state = "off";
   h2.states["input_select.oppvaskmaskin_status"].state = "Ferdig";
   const m2 = buildModel(h2, config, NOW);
   const d = m2.items.find((i) => i.id === "appliance:Oppvaskmaskin");
