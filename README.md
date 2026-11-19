@@ -2,6 +2,8 @@
 
 A Home Assistant card that shows everything that needs doing in the house in one list, made for a shared wall tablet.
 
+![The card with a running dishwasher, overdue tasks, today's waste collection and upcoming tasks](docs/card.png)
+
 - **In progress:** appliances that are running, with phase, finish time and progress.
 - **To do:** [Maintenance Supporter](https://github.com/iluebbe/maintenance_supporter) tasks that are due soon, overdue or triggered, plus appliances that are finished but not emptied.
 - **Who did it:** tapping **Done** asks who did the task, so completions are recorded on the right person even when the tablet is logged in as one shared user. Maintenance Supporter's rotation depends on this.
