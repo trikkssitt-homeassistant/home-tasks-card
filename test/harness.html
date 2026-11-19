@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="no">
+<head>
+<meta charset="utf-8">
+<title>home-tasks-card harness</title>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  body { margin: 0; font-family: Roboto, system-ui, sans-serif; display: flex; gap: 24px; padding: 24px; }
+  .light { --primary-background-color:#E9ECEA; --card-background-color:#F7F8F7; --primary-text-color:#1E2624;
+           --secondary-text-color:#5F6B68; --secondary-background-color:#E9ECEA; --divider-color:#DCE1DF;
+           --error-color:#B8322A; --state-active-color:#E3A72F; --primary-color:#2F3D3A; }
+  .dark { --primary-background-color:#1C2321; --card-background-color:#262E2C; --primary-text-color:#E6EBE9;
+          --secondary-text-color:#8E9A97; --secondary-background-color:#1C2321; --divider-color:#34403D;
+          --error-color:#E5675A; --state-active-color:#E3A72F; --primary-color:#C9D3D0; }
+  .pane { background: var(--primary-background-color); color: var(--primary-text-color); padding: 16px; width: 360px; }
+</style>
+</head>
+<body>
+<div class="pane light" id="a"></div>
+<div class="pane dark" id="b"></div>
+<script>
+  customElements.define("ha-card", class extends HTMLElement {
+    connectedCallback() { this.style.cssText = "display:block;background:var(--card-background-color);border-radius:14px;"; }
+  });
+  customElements.define("ha-icon", class extends HTMLElement {
+    connectedCallback() { this.style.cssText = "display:inline-block;width:22px;height:22px;border-radius:50%;border:2px solid currentColor;box-sizing:border-box"; }
+  });
+</script>
+<script src="../dist/home-tasks-card.js"></script>
+<script type="module">
+  import { hass, config } from "./fixtures.mjs";
+  const pic = (c, t) => "data:image/svg+xml;utf8," + encodeURIComponent(
+    `<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><rect width='60' height='60' fill='${c}'/><text x='30' y='38' font-size='20' text-anchor='middle' fill='white' font-family='sans-serif'>${t}</text></svg>`);
+  hass.states["person.anders"].attributes.entity_picture = pic("#6b7f7a", "A");
+  hass.states["person.berit"].attributes.entity_picture = pic("#8a7a6b", "B");
+  // Show one shared rotating task with several people:
+  hass.states["sensor.tommekalender_papp_papir"].attributes.shared_with = ["person.david", "person.cecilie"];
+  hass.callService = async (...a) => { console.log("callService", JSON.stringify(a)); };
+  for (const id of ["a", "b"]) {
+    const c = document.createElement("home-tasks-card");
+    c.setConfig(config);
+    c.hass = hass;
+    document.getElementById(id).appendChild(c);
+  }
+  window.ready = true;
+</script>
+</body>
+</html>

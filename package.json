@@ -1,0 +1,12 @@
+{
+  "name": "home-tasks-card",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Home Assistant card: Maintenance Supporter tasks and appliances in one list for a shared tablet.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "check": "node --check dist/home-tasks-card.js",
+    "test": "TZ=Europe/Oslo node --test test/*.test.mjs"
+  }
+}
