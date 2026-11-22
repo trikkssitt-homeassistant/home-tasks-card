@@ -4,13 +4,15 @@
  *
  * "In progress": appliances that are running, with phase, finish time and progress.
  * "To do": Maintenance Supporter tasks that are due soon, overdue or triggered, plus
- * appliances that are finished but not emptied. Tap a row to mark it done and pick who
- * did it; hold a task to skip it.
+ * appliances that are finished but not emptied, calendar events (birthdays, appointments),
+ * to-do list items and date entities. Tap a row to mark it done and pick who did it; hold
+ * a task to skip it.
  *
- * The card owns no state. It reads hass.states and calls Maintenance Supporter's services.
+ * The card owns no state. It reads hass.states, fetches calendar events and to-do items,
+ * and calls Maintenance Supporter's and the to-do integration's services.
  */
 
-const CARD_VERSION = "0.1.0";
+const CARD_VERSION = "0.2.0";
 
 const DEFAULTS = {
   title: null, // null: translated default
@@ -20,7 +22,12 @@ const DEFAULTS = {
   exclude_objects: [],
   include_statuses: ["due_soon", "overdue", "triggered"],
   appliances: [],
+  calendars: [],
+  todo_lists: [],
+  dates: [],
 };
+
+const FETCH_EVERY_MS = 15 * 60000;
 
 const HC_RUNNING = ["run", "pause", "delayedstart", "actionrequired"];
 const PRIORITY_RANK = { high: 0, normal: 1, low: 2 };
@@ -45,6 +52,11 @@ const I18N = {
     days_overdue: (n) => `Forfalt for ${n} dager siden`,
     finished_at: (t) => `Ferdig kl. ${t}`,
     finishes_at: (t) => `ferdig kl. ${t}`,
+    at: (day, t) => `${day} kl. ${t}`,
+    years: (n) => `${n} år`,
+    uses: "Bruker",
+    in_stock: (n) => `${n} på lager`,
+    todo_done_q: (title) => `Er «${title}» gjort?`,
     empty_task: (name) => `Tøm ${name.toLowerCase()}`,
     opens_door: "Forsvinner når døren åpnes",
     who_did: (title) => `Hvem gjorde «${title}»?`,
@@ -73,6 +85,11 @@ const I18N = {
     days_overdue: (n) => `Overdue by ${n} days`,
     finished_at: (t) => `Finished at ${t}`,
     finishes_at: (t) => `done at ${t}`,
+    at: (day, t) => `${day} at ${t}`,
+    years: (n) => `${n} years`,
+    uses: "Uses",
+    in_stock: (n) => `${n} in stock`,
+    todo_done_q: (title) => `Is "${title}" done?`,
     empty_task: (name) => `Empty the ${name.toLowerCase()}`,
     opens_door: "Clears when the door is opened",
     who_did: (title) => `Who did "${title}"?`,
@@ -249,13 +266,154 @@ function applianceStatus(hass, ap, now, L) {
   return { running: null, todo: null };
 }
 
-/** Sort: urgency, then due date (none first: triggered and appliances), priority, title. */
+/** The date part of a date, datetime or timestamp string, in local time. */
+function localDate(value) {
+  const v = String(value ?? "");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(v)) return v;
+  if (/^\d{4}-\d{2}-\d{2}[ T]\d/.test(v)) {
+    // A timestamp with an offset is converted to local time; a naive one is local already.
+    const d = /[zZ]|[+-]\d{2}:?\d{2}$/.test(v) ? new Date(v) : null;
+    return d && !isNaN(d) ? localDay(d) : v.slice(0, 10);
+  }
+  return null;
+}
+
+/** Display name of a configured source: its `name`, else the entity's friendly name. */
+const sourceName = (hass, src) => src.name || hass?.states?.[src.entity]?.attributes?.friendly_name || src.entity;
+
+/**
+ * Calendar events from now to `days_ahead` days ahead. They have no button: an event is
+ * not done, it is over. `events` is what /api/calendars/<entity> returned, per entity.
+ */
+function collectEvents(hass, cfg, events, now) {
+  const out = [];
+  for (const src of cfg.calendars || []) {
+    const ahead = Number(src.days_ahead ?? 7);
+    for (const ev of events?.[src.entity] || []) {
+      const allDay = !!ev.start?.date;
+      let days;
+      let time = null;
+      let ongoing = false;
+      if (allDay) {
+        days = daysUntil(ev.start.date, now);
+        const endDays = daysUntil(ev.end?.date, now); // exclusive
+        if (endDays !== null && endDays <= 0) continue;
+      } else {
+        const start = new Date(ev.start?.dateTime);
+        const end = ev.end?.dateTime ? new Date(ev.end.dateTime) : start;
+        if (isNaN(start) || end < now) continue;
+        days = daysUntil(localDay(start), now);
+        ongoing = start <= now;
+        if (days >= 0) time = hhmm(start);
+      }
+      if (days === null || days > ahead) continue;
+      days = Math.max(0, days);
+      const due = localDay(new Date(now.getFullYear(), now.getMonth(), now.getDate() + days));
+      out.push({
+        kind: "event",
+        id: `event:${src.entity}:${ev.uid || ev.summary}:${ev.recurrence_id || ev.start?.date || ev.start?.dateTime}`,
+        title: ev.summary || "",
+        object: sourceName(hass, src),
+        due,
+        time,
+        ongoing,
+        days,
+        urgency: days === 0 ? "today" : "soon",
+        priority: "normal",
+        assignees: src.persons || [],
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Open to-do items. `items` is what todo/item/list returned, per entity. Items with a due
+ * date further away than `days_ahead` wait; items without one show unless `show_undated`
+ * is false.
+ */
+function collectTodos(hass, cfg, items, now) {
+  const out = [];
+  for (const src of cfg.todo_lists || []) {
+    const ahead = src.days_ahead ?? null;
+    const undated = src.show_undated ?? true;
+    for (const it of items?.[src.entity] || []) {
+      if (it.status !== "needs_action") continue;
+      const due = it.due ? localDate(it.due) : null;
+      const days = due ? daysUntil(due, now) : null;
+      if (days === null && !undated) continue;
+      if (days !== null && ahead !== null && days > Number(ahead)) continue;
+      const time = it.due && String(it.due).length > 10 ? hhmm(new Date(it.due)) : null;
+      out.push({
+        kind: "todo",
+        id: `todo:${src.entity}:${it.uid}`,
+        entity: src.entity,
+        uid: it.uid,
+        title: it.summary || "",
+        object: sourceName(hass, src),
+        due,
+        time,
+        days,
+        urgency: days === null ? "soon" : days < 0 ? "overdue" : days === 0 ? "today" : "soon",
+        priority: "normal",
+        assignees: src.persons || [],
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * Entities whose state is a date (input_datetime, a date or timestamp sensor). `yearly`
+ * shows the next anniversary, with the age when the year is known: birthdays. A date
+ * that is not yearly and has passed stays as overdue until the entity changes.
+ */
+function collectDates(hass, cfg, now) {
+  const S = hass?.states || {};
+  const out = [];
+  for (const src of cfg.dates || []) {
+    const st = S[src.entity];
+    const date = st && localDate(st.state);
+    if (!date) continue;
+    const ahead = Number(src.days_ahead ?? 14);
+    let due = date;
+    let age = null;
+    if (src.yearly) {
+      const [y, m, d] = date.split("-").map(Number);
+      let year = now.getFullYear();
+      if (daysUntil(`${year}-${pad2(m)}-${pad2(d)}`, now) < 0) year += 1;
+      due = `${year}-${pad2(m)}-${pad2(d)}`;
+      if (y > 1900 && y < year) age = year - y;
+    }
+    const days = daysUntil(due, now);
+    if (days > ahead) continue;
+    out.push({
+      kind: "date",
+      id: `date:${src.entity}`,
+      title: sourceName(hass, src),
+      object: "",
+      due,
+      days,
+      age,
+      urgency: days < 0 ? "overdue" : days === 0 ? "today" : "soon",
+      priority: "normal",
+      assignees: src.persons || [],
+    });
+  }
+  return out;
+}
+
+/**
+ * Sort: urgency, then due date (none first: triggered tasks and appliances; undated to-do
+ * items last), time of day, priority, title.
+ */
 function sortItems(items) {
+  const key = (i) => (i.kind === "todo" && !i.due ? "~" : (i.due || "") + (i.time ? `T${i.time}` : ""));
   return [...items].sort((a, b) => {
     const u = URGENCY_RANK[a.urgency] - URGENCY_RANK[b.urgency];
     if (u) return u;
-    const da = a.due || "";
-    const db = b.due || "";
+    const da = key(a);
+    const db = key(b);
     if (da !== db) return da < db ? -1 : 1;
     const p = (PRIORITY_RANK[a.priority] ?? 1) - (PRIORITY_RANK[b.priority] ?? 1);
     if (p) return p;
@@ -263,19 +421,27 @@ function sortItems(items) {
   });
 }
 
-/** Secondary line text for a row. */
-function dueText(item, now, L) {
-  if (item.kind === "appliance") return L.finished_at(hhmm(item.finishedAt));
-  if (item.status === "triggered" && item.days === null) return L.now;
-  const d = item.days;
-  if (d === null) return item.status === "overdue" ? L.days_overdue("?") : "";
-  if (d < -1) return L.days_overdue(-d);
-  if (d === -1) return L.yesterday_overdue;
+/** "I dag", "I morgen", a weekday within a week, else a date. `d` >= 0. */
+function dayWord(d, now, L) {
   if (d === 0) return L.today;
   if (d === 1) return L.tomorrow;
   const due = new Date(now.getFullYear(), now.getMonth(), now.getDate() + d);
   if (d < 7) return L.weekdays[due.getDay()];
   return `${due.getDate()}. ${L.months[due.getMonth()]}`;
+}
+
+/** Secondary line text for a row. */
+function dueText(item, now, L) {
+  if (item.kind === "appliance") return L.finished_at(hhmm(item.finishedAt));
+  if (item.kind === "event" && item.ongoing) return L.now;
+  if (item.status === "triggered" && item.days === null) return L.now;
+  const d = item.days;
+  if (d === null || d === undefined) return item.status === "overdue" ? L.days_overdue("?") : "";
+  if (d < -1) return L.days_overdue(-d);
+  if (d === -1) return L.yesterday_overdue;
+  const day = dayWord(d, now, L);
+  const text = item.time ? L.at(day, item.time) : day;
+  return item.age ? `${text}, ${L.years(item.age)}` : text;
 }
 
 /** People offered in the "who did it" picker. */
@@ -287,12 +453,20 @@ function pickPersons(hass, config) {
     .map((e) => ({ id: e, name: S[e].attributes?.friendly_name || e, picture: S[e].attributes?.entity_picture || null }));
 }
 
-/** Build everything the card shows from hass + config. Pure; used by tests. */
-function buildModel(hass, config, now = new Date()) {
+/**
+ * Build everything the card shows from hass + config. Pure; used by tests.
+ * `ext` holds what was fetched: { events: {calendar.x: [...]}, todos: {todo.x: [...]} }.
+ */
+function buildModel(hass, config, now = new Date(), ext = {}) {
   const cfg = { ...DEFAULTS, ...config };
   const L = I18N[pickLang(cfg, hass)];
   const running = [];
-  const items = collectTasks(hass, cfg, now);
+  const items = [
+    ...collectTasks(hass, cfg, now),
+    ...collectEvents(hass, cfg, ext.events, now),
+    ...collectTodos(hass, cfg, ext.todos, now),
+    ...collectDates(hass, cfg, now),
+  ];
   for (const ap of cfg.appliances || []) {
     const s = applianceStatus(hass, ap, now, L);
     if (s.running) running.push(s.running);
@@ -301,6 +475,34 @@ function buildModel(hass, config, now = new Date()) {
   const sorted = sortItems(items).map((it) => ({ ...it, sub: dueText(it, now, L) }));
   return { running, items: sorted };
 }
+
+/**
+ * The spare parts a completion of this task books, from the maintenance_supporter/objects
+ * response: the task's consumes_parts links, resolved on the owning object (a link may
+ * point to a part shared from another object). Phase overrides are not shown.
+ * Returns [{ name, quantity, unit, stock }]; [] when the task uses no parts.
+ */
+function partsForTask(objectsResponse, entityId) {
+  const objects = objectsResponse?.objects || [];
+  const byEntry = new Map(objects.map((o) => [o.entry_id, o]));
+  for (const o of objects) {
+    const task = (o.tasks || []).find((t) => t.sensor_entity_id === entityId);
+    if (!task) continue;
+    return (task.consumes_parts || [])
+      .map((link) => {
+        const owner = byEntry.get(link.entry_id || o.entry_id);
+        const part = (owner?.parts || []).find((p) => p.id === link.part_id);
+        if (!part) return null;
+        const stock = typeof part.stock === "number" ? part.stock : null;
+        return { name: part.name || link.part_id, quantity: Number(link.quantity ?? 1), unit: part.unit || "", stock };
+      })
+      .filter(Boolean);
+  }
+  return [];
+}
+
+/** 1, 1,5, 0,25 in the card's language: no trailing zeros. */
+const qty = (n, lang) => new Intl.NumberFormat(lang, { maximumFractionDigits: 2 }).format(Number(n));
 
 /* ---------------------------------------------------------------- styles */
 
@@ -356,6 +558,7 @@ const STYLE = `
            color: var(--primary-text-color); width: min(520px, calc(100vw - 32px)); box-shadow: 0 8px 32px rgba(0,0,0,.25); }
   dialog::backdrop { background: rgba(0,0,0,.45); }
   .dlg { padding: 24px; }
+  .dlg:focus { outline: none; }
   .dlg h4 { margin: 0 0 18px; font-size: 20px; font-weight: 500; line-height: 1.3; }
   .people { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
   .person { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 8px; min-width: 84px;
@@ -365,6 +568,10 @@ const STYLE = `
   .person span { font-size: 14px; }
   .dlg input { width: 100%; box-sizing: border-box; min-height: 44px; padding: 0 12px; border-radius: 10px;
                border: 1px solid var(--_divider); background: transparent; color: inherit; font: inherit; margin-bottom: 20px; }
+  .parts { margin: -4px 0 20px; }
+  .parts .lbl { font-size: 13px; color: var(--_muted); margin-bottom: 4px; }
+  .parts li { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-top: 0; font-size: 15px; }
+  .parts .stock { color: var(--_muted); font-size: 13px; }
   .row { display: flex; gap: 12px; justify-content: flex-end; }
   .btn { min-height: 48px; padding: 0 22px; border-radius: 12px; border: 1px solid var(--_divider);
          background: transparent; font-size: 16px; }
@@ -388,17 +595,31 @@ class HomeTasksCard extends HTMLElement {
       if (type === "entities" && !(ap.running?.entity && ap.finished?.entity))
         throw new Error(`appliance "${ap.name || "?"}": running.entity and finished.entity are required`);
     }
+    for (const key of ["calendars", "todo_lists", "dates"]) {
+      if (config[key] !== undefined && !Array.isArray(config[key])) throw new Error(`${key} must be a list`);
+      for (const src of config[key] || []) if (!src?.entity) throw new Error(`${key}: every entry needs an entity`);
+    }
     this._config = { ...DEFAULTS, ...config };
     this._expanded = false;
     this._dialog = null;
     this._errors = new Map();
     this._leaving = new Set();
-    this._render();
+    this._ext = { events: {}, todos: {} };
+    this._extSig = null;
+    this._fetchedAt = 0;
+    this._render(); // the next hass update fetches (the signature was reset)
   }
 
   set hass(hass) {
     const first = !this._hass;
     this._hass = hass;
+    // Calendars and to-do lists: their events and items are not in hass.states. Fetch again
+    // when the entity changes (a to-do list's state is its open count).
+    const extSig = this._externalSignature();
+    if (extSig !== this._extSig) {
+      this._extSig = extSig;
+      this._fetch();
+    }
     const sig = this._signature();
     if (first || sig !== this._sig) {
       this._sig = sig;
@@ -408,7 +629,65 @@ class HomeTasksCard extends HTMLElement {
 
   connectedCallback() {
     clearInterval(this._tick);
-    this._tick = setInterval(() => this._render(), 60000);
+    this._tick = setInterval(() => {
+      // Calendars change without their entity changing: fetch every 15 minutes and at midnight.
+      const now = new Date();
+      if (now - this._fetchedAt > FETCH_EVERY_MS || localDay(now) !== localDay(new Date(this._fetchedAt))) this._fetch();
+      this._render();
+    }, 60000);
+  }
+
+  _externalSignature() {
+    const S = this._hass?.states || {};
+    const cfg = this._config || {};
+    return [...(cfg.calendars || []), ...(cfg.todo_lists || [])]
+      .map((src) => `${src.entity}|${S[src.entity]?.state}|${S[src.entity]?.last_updated}`)
+      .join("|");
+  }
+
+  /** Fetch calendar events and to-do items. One fetch at a time; a request during one runs after it. */
+  async _fetch() {
+    const hass = this._hass;
+    const cfg = this._config;
+    if (!hass || !cfg || !(cfg.calendars.length || cfg.todo_lists.length)) return;
+    if (this._fetching) {
+      this._fetchAgain = true;
+      return;
+    }
+    this._fetching = true;
+    this._fetchedAt = Date.now();
+    const now = new Date();
+    const from = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const events = {};
+    const todos = {};
+    const jobs = [
+      ...cfg.calendars.map(async (src) => {
+        const to = new Date(from.getFullYear(), from.getMonth(), from.getDate() + Number(src.days_ahead ?? 7) + 1);
+        const q = `start=${encodeURIComponent(from.toISOString())}&end=${encodeURIComponent(to.toISOString())}`;
+        try {
+          events[src.entity] = await hass.callApi("GET", `calendars/${src.entity}?${q}`);
+        } catch (err) {
+          events[src.entity] = this._ext.events[src.entity] || [];
+          console.warn(`home-tasks-card: ${src.entity}:`, err?.message || err);
+        }
+      }),
+      ...cfg.todo_lists.map(async (src) => {
+        try {
+          todos[src.entity] = (await hass.callWS({ type: "todo/item/list", entity_id: src.entity })).items || [];
+        } catch (err) {
+          todos[src.entity] = this._ext.todos[src.entity] || [];
+          console.warn(`home-tasks-card: ${src.entity}:`, err?.message || err);
+        }
+      }),
+    ];
+    await Promise.all(jobs);
+    this._ext = { events, todos };
+    this._fetching = false;
+    this._render();
+    if (this._fetchAgain) {
+      this._fetchAgain = false;
+      this._fetch();
+    }
   }
 
   disconnectedCallback() {
@@ -439,6 +718,7 @@ class HomeTasksCard extends HTMLElement {
           : [ap.running?.entity, ap.finished?.entity, ap.phase, ap.remaining, ap.progress];
       for (const id of ids) if (id) parts.push(id, S[id]?.state, S[id]?.last_changed);
     }
+    for (const src of this._config?.dates || []) parts.push(src.entity, S[src.entity]?.state);
     return parts.join("|");
   }
 
@@ -477,7 +757,7 @@ class HomeTasksCard extends HTMLElement {
     }
     const L = this._L;
     const cfg = this._config;
-    const model = buildModel(this._hass, cfg, new Date());
+    const model = buildModel(this._hass, cfg, new Date(), this._ext);
     this._model = model;
     for (const id of [...this._leaving]) if (!model.items.some((i) => i.id === id)) this._leaving.delete(id);
 
@@ -499,11 +779,15 @@ class HomeTasksCard extends HTMLElement {
 
     const rows = shown
       .map((it) => {
-        const meta = it.kind === "task" && it.object ? `${it.object}, ${it.sub.toLowerCase()}` : it.sub;
+        const meta = it.object ? `${it.object}, ${it.sub.toLowerCase()}` : it.sub;
         const err = this._errors.get(it.id);
         let right = "";
         if (it.kind === "task") {
           right = `<button class="act" data-act="done" data-id="${esc(it.id)}">${esc(L.done)}</button>`;
+        } else if (it.kind === "todo") {
+          right = `<button class="act" data-act="todo" data-id="${esc(it.id)}">${esc(L.done)}</button>`;
+        } else if (it.kind === "event" || it.kind === "date") {
+          right = ""; // nothing to do: it is over when the day is
         } else if (it.action) {
           right = `<button class="act" data-act="emptied" data-id="${esc(it.id)}">${esc(L.emptied)}</button>`;
         } else {
@@ -565,13 +849,36 @@ class HomeTasksCard extends HTMLElement {
         })
         .join("");
       const ask = this._config.ask_who;
-      return `<dialog data-act="close" aria-label="${esc(L.who_did(it.title))}"><div class="dlg">
+      const lang = pickLang(this._config, this._hass);
+      const parts = d.parts?.length
+        ? `<div class="parts"><div class="lbl">${esc(L.uses)}</div><ul>${d.parts
+            .map(
+              (p) =>
+                `<li><span>${esc(qty(p.quantity, lang))}${p.unit ? ` ${esc(p.unit)}` : " ×"} ${esc(p.name)}</span>${
+                  p.stock !== null ? `<span class="stock">${esc(L.in_stock(qty(p.stock, lang)))}</span>` : ""
+                }</li>`,
+            )
+            .join("")}</ul></div>`
+        : "";
+      // Until someone is picked, Done is disabled; autofocus on it would make the browser
+      // focus the first person instead, which looks like a choice. Focus the dialog then.
+      const waiting = ask && !d.who;
+      return `<dialog data-act="close" aria-label="${esc(L.who_did(it.title))}"><div class="dlg" tabindex="-1"${
+        waiting ? " autofocus" : ""
+      }>
         <h4>${esc(ask ? L.who_did(it.title) : it.title)}</h4>
         ${ask ? `<div class="people">${people}</div>` : ""}
+        ${parts}
         <div class="row"><button class="btn" data-act="close">${esc(L.cancel)}</button>
-        <button class="btn primary" data-act="confirm" ${ask && !d.who ? "disabled" : ""} autofocus>${esc(
+        <button class="btn primary" data-act="confirm" ${waiting ? "disabled" : "autofocus"}>${esc(
           L.done,
         )}</button></div></div></dialog>`;
+    }
+    if (d.type === "todo") {
+      return `<dialog data-act="close"><div class="dlg">
+        <h4>${esc(L.todo_done_q(it.title))}</h4>
+        <div class="row"><button class="btn" data-act="close">${esc(L.cancel)}</button>
+        <button class="btn primary" data-act="confirm" autofocus>${esc(L.done)}</button></div></div></dialog>`;
     }
     if (d.type === "emptied") {
       return `<dialog data-act="close"><div class="dlg">
@@ -622,8 +929,10 @@ class HomeTasksCard extends HTMLElement {
     }
     if (act === "done") {
       const it = this._item(el.dataset.id);
-      return this._open({ type: "done", id: el.dataset.id, who: it?.responsible || null });
+      this._open({ type: "done", id: el.dataset.id, who: it?.responsible || null, parts: null });
+      return this._loadParts(el.dataset.id);
     }
+    if (act === "todo") return this._open({ type: "todo", id: el.dataset.id });
     if (act === "emptied") return this._open({ type: "emptied", id: el.dataset.id });
     if (act === "pick") {
       this._dialog.who = el.dataset.person;
@@ -634,6 +943,24 @@ class HomeTasksCard extends HTMLElement {
       return this._render();
     }
     if (act === "confirm") return this._confirm();
+  }
+
+  /**
+   * Show the spare parts the completion books (from Maintenance Supporter's own objects
+   * command). Fetched when the dialog opens, so the stock is current. Shows nothing when it
+   * fails: an older Maintenance Supporter, or a task without parts.
+   */
+  async _loadParts(id) {
+    try {
+      const res = await this._hass.callWS({ type: "maintenance_supporter/objects", compact: true });
+      const parts = partsForTask(res, id);
+      if (this._dialog?.type === "done" && this._dialog.id === id && parts.length) {
+        this._dialog.parts = parts;
+        this._render();
+      }
+    } catch (err) {
+      console.warn("home-tasks-card: parts:", err?.message || err);
+    }
   }
 
   async _confirm() {
@@ -654,6 +981,9 @@ class HomeTasksCard extends HTMLElement {
         const data = { entity_id: it.id };
         if (d.reason) data.reason = d.reason;
         await this._hass.callService("maintenance_supporter", "skip", data);
+      } else if (d.type === "todo") {
+        await this._hass.callService("todo", "update_item", { item: it.uid, status: "completed" }, { entity_id: it.entity });
+        this._fetch();
       } else if (d.type === "emptied") {
         const a = it.action || {};
         const [domain, service] = String(a.action || a.service || "").split(".");
@@ -679,6 +1009,11 @@ HomeTasksCard._internals = {
   applianceStatus,
   sortItems,
   dueText,
+  localDate,
+  collectEvents,
+  collectTodos,
+  collectDates,
+  partsForTask,
   pickPersons,
   buildModel,
 };
@@ -689,7 +1024,7 @@ if (!customElements.get("home-tasks-card")) {
   window.customCards.push({
     type: "home-tasks-card",
     name: "Home Tasks Card",
-    description: "Maintenance Supporter tasks and appliances in one list for a shared tablet.",
+    description: "Maintenance Supporter tasks, appliances, calendars and to-do lists in one list for a shared tablet.",
     documentationURL: "https://github.com/trikkssitt/home-tasks-card",
   });
   console.info(`%chome-tasks-card ${CARD_VERSION}`, "font-weight:600");

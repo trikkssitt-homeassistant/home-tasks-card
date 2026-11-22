@@ -6,10 +6,12 @@ A Home Assistant card that shows everything that needs doing in the house in one
 
 - **In progress:** appliances that are running, with phase, finish time and progress.
 - **To do:** [Maintenance Supporter](https://github.com/iluebbe/maintenance_supporter) tasks that are due soon, overdue or triggered, plus appliances that are finished but not emptied.
+- **Calendars, to-do lists and dates:** birthdays and appointments from any calendar, open items from any to-do list, and entities that hold a date (a yearly one shows the age), sorted into the same list.
+- **Spare parts:** the done dialog shows the parts Maintenance Supporter books for the task and how many are in stock.
 - **Who did it:** tapping **Done** asks who did the task, so completions are recorded on the right person even when the tablet is logged in as one shared user. Maintenance Supporter's rotation depends on this.
 - **Skip:** hold a task to skip it this time, with an optional reason.
 
-The card owns no state. It reads `hass.states` and calls Maintenance Supporter's `complete` and `skip` services.
+The card owns no state. It reads `hass.states`, fetches calendar events and to-do items, and calls Maintenance Supporter's `complete` and `skip` services and `todo.update_item`.
 
 ## Requirements
 
@@ -25,7 +27,7 @@ Add `https://github.com/trikkssitt/home-tasks-card` as a **Dashboard** repositor
 
 ### Manual
 
-Copy `dist/home-tasks-card.js` to `/config/www/` and add the resource `/local/home-tasks-card.js?v=0.1.0` as a **JavaScript module**. Change `?v=` on every update.
+Copy `dist/home-tasks-card.js` to `/config/www/` and add the resource `/local/home-tasks-card.js?v=0.2.0` as a **JavaScript module**. Change `?v=` on every update.
 
 ## Configuration
 
@@ -58,6 +60,20 @@ appliances:
       action: input_select.select_option
       target: { entity_id: input_select.oppvaskmaskin_status }
       data: { option: Avsluttet }
+calendars:
+  - entity: calendar.bursdager
+    days_ahead: 14
+  - entity: calendar.familie
+    name: Familien
+todo_lists:
+  - entity: todo.husarbeid
+    days_ahead: 7              # undated items still show
+dates:
+  - entity: input_datetime.berit_bursdag
+    name: Berit har bursdag
+    yearly: true               # next anniversary, with the age
+    persons: [person.berit]
+  - entity: input_datetime.eu_kontroll   # overdue once passed
 ```
 
 ### Card options
@@ -71,6 +87,9 @@ appliances:
 | `exclude_objects` | none | Maintenance Supporter objects (`parent_object`) to hide. |
 | `include_statuses` | `[due_soon, overdue, triggered]` | Task statuses to show. |
 | `appliances` | none | See below. |
+| `calendars` | none | See [Calendars](#calendars). |
+| `todo_lists` | none | See [To-do lists](#to-do-lists). |
+| `dates` | none | See [Dates](#dates). |
 | `language` | Home Assistant's language | `nb` or `en`. |
 
 ### Appliances
@@ -86,6 +105,45 @@ appliances:
 | `overdue_after` | Minutes after finishing before the row turns red. Default `60`. |
 | `emptied_action` | Action run by the **Emptied** button. Without it no button is shown; Home Connect machines clear themselves when the door is opened. |
 | `icon` | Icon in "In progress". |
+
+### Calendars
+
+Events from now until `days_ahead` days ahead. An event has no button: it disappears when it is over. Timed events show the time, and an event that is happening says "Now". Events are fetched when the card loads, every 15 minutes, at midnight and when the calendar entity changes.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `entity` | required | A `calendar.*` entity. |
+| `name` | the entity's name | Shown before the date, as the object is for tasks. |
+| `days_ahead` | `7` | How far ahead to show events. |
+| `persons` | none | People whose faces are shown on the rows. |
+
+### To-do lists
+
+Open items from a Home Assistant to-do list (Local To-do, Google Tasks, the shopping list...). **Done** marks the item completed with `todo.update_item`. To-do lists do not record who did it, so the card does not ask.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `entity` | required | A `todo.*` entity. |
+| `name` | the entity's name | Shown before the date. |
+| `days_ahead` | all | Items due further ahead wait. |
+| `show_undated` | `true` | Show items without a due date (sorted last). |
+| `persons` | none | Faces on the rows. |
+
+### Dates
+
+Entities whose state is a date: `input_datetime` (with date), date sensors and timestamp sensors. There is no button; change the entity to make the row go away.
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `entity` | required | The entity. |
+| `name` | the entity's name | Row title. |
+| `yearly` | `false` | Show the next anniversary. With a year before this one in the date, the row says how old (`I morgen, 40 år`). Without `yearly`, a date that has passed shows as overdue. |
+| `days_ahead` | `14` | How far ahead to show it. |
+| `persons` | none | Faces on the row. |
+
+### Spare parts
+
+When a task is linked to spare parts in Maintenance Supporter, completing it takes them off the stock. The done dialog lists those parts and the stock, read from Maintenance Supporter's `maintenance_supporter/objects` command when the dialog opens. Parts that a task phase overrides are not shown. Choosing other parts than the linked ones needs `used_parts` on the `complete` service, which Maintenance Supporter does not have yet.
 
 ### Theming
 

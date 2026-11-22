@@ -26,9 +26,16 @@
     connectedCallback() { this.style.cssText = "display:inline-block;width:22px;height:22px;border-radius:50%;border:2px solid currentColor;box-sizing:border-box"; }
   });
 </script>
-<script src="../dist/home-tasks-card.js"></script>
 <script type="module">
-  import { hass, config } from "./fixtures.mjs";
+  import { hass, config as baseConfig, ext, sourcesConfig, objectsResponse, NOW } from "./fixtures.mjs";
+  // The fixtures are dated 19 Nov 2026 12:30; freeze the clock there so the rows match the tests.
+  const RealDate = Date;
+  const offset = NOW.getTime() - RealDate.now();
+  globalThis.Date = class extends RealDate {
+    constructor(...a) { super(...(a.length ? a : [RealDate.now() + offset])); }
+    static now() { return RealDate.now() + offset; }
+  };
+  const config = { ...baseConfig, ...sourcesConfig };
   const pic = (c, t) => "data:image/svg+xml;utf8," + encodeURIComponent(
     `<svg xmlns='http://www.w3.org/2000/svg' width='60' height='60'><rect width='60' height='60' fill='${c}'/><text x='30' y='38' font-size='20' text-anchor='middle' fill='white' font-family='sans-serif'>${t}</text></svg>`);
   hass.states["person.anders"].attributes.entity_picture = pic("#6b7f7a", "A");
@@ -36,11 +43,25 @@
   // Show one shared rotating task with several people:
   hass.states["sensor.tommekalender_papp_papir"].attributes.shared_with = ["person.david", "person.cecilie"];
   hass.callService = async (...a) => { console.log("callService", JSON.stringify(a)); };
+  hass.callApi = async (method, path) => ext.events[path.split("?")[0].replace("calendars/", "")] || [];
+  hass.callWS = async (msg) => {
+    if (msg.type === "todo/item/list") return { items: ext.todos[msg.entity_id] || [] };
+    if (msg.type === "maintenance_supporter/objects") return objectsResponse;
+    throw new Error(`unknown ${msg.type}`);
+  };
+  await import("../dist/home-tasks-card.js");
   for (const id of ["a", "b"]) {
     const c = document.createElement("home-tasks-card");
     c.setConfig(config);
     c.hass = hass;
     document.getElementById(id).appendChild(c);
+  }
+  // harness.html#<entity_id> opens the done dialog for that task in the light card (parts included).
+  if (location.hash) {
+    setTimeout(() => {
+      const root = document.querySelector("#a home-tasks-card").shadowRoot;
+      root.querySelector(`button[data-id="${CSS.escape(location.hash.slice(1))}"]`)?.click();
+    }, 300);
   }
   window.ready = true;
 </script>
