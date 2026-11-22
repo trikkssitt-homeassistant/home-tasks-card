@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
-import { hass, config, NOW } from "./fixtures.mjs";
+import { hass, config, NOW, ext, sourcesConfig, objectsResponse } from "./fixtures.mjs";
 
 function loadCard() {
   const src = readFileSync(new URL("../dist/home-tasks-card.js", import.meta.url), "utf8");
@@ -23,7 +23,7 @@ function loadCard() {
   return registry.get("home-tasks-card")._internals;
 }
 
-const { buildModel, daysUntil, taskTitle, dueText, pickPersons, I18N } = loadCard();
+const { buildModel, daysUntil, taskTitle, dueText, pickPersons, partsForTask, localDate, I18N } = loadCard();
 const L = I18N.nb;
 const model = buildModel(hass, config, NOW);
 const ids = Array.from(model.items, (i) => i.id);
@@ -144,4 +144,100 @@ test("person picker uses the configured persons", () => {
 test("empty house: no items, no running", () => {
   const m = buildModel({ states: {}, entities: {}, devices: {}, language: "nb" }, {}, NOW);
   assert.deepEqual([m.items.length, m.running.length], [0, 0]);
+});
+
+// ---- Calendars, to-do lists and dates
+
+const full = buildModel(hass, { ...config, ...sourcesConfig }, NOW, ext);
+const row = (id) => full.items.find((i) => i.id === id);
+const plain = (v) => JSON.parse(JSON.stringify(v)); // arrays from the vm context are not deepEqual to ours
+
+test("without fetched data the new sources add nothing, and tasks keep their order", () => {
+  const m = buildModel(hass, { ...config, calendars: sourcesConfig.calendars, todo_lists: sourcesConfig.todo_lists }, NOW);
+  assert.deepEqual(Array.from(m.items, (i) => i.id), ids);
+});
+
+test("calendar events: within days_ahead, finished ones gone, ongoing all-day today", () => {
+  const ev = full.items.filter((i) => i.kind === "event").map((i) => [i.title, i.sub, i.object, i.urgency]);
+  assert.deepEqual(plain(ev), [
+    ["Høstferie", "I dag", "Familien", "today"],
+    ["Foreldremøte", "I dag kl. 18:00", "Familien", "today"],
+    ["Cecilie 12 år", "lørdag", "Bursdager", "soon"],
+  ]);
+});
+
+test("an event that is happening now says so", () => {
+  const at = new Date(2026, 10, 19, 18, 15);
+  const m = buildModel(hass, { calendars: sourcesConfig.calendars }, at, ext);
+  assert.equal(m.items.find((i) => i.title === "Foreldremøte").sub, "Nå");
+});
+
+test("to-do items: open only, overdue by due date, undated last, beyond days_ahead hidden", () => {
+  const td = full.items.filter((i) => i.kind === "todo").map((i) => [i.title, i.urgency, i.sub]);
+  assert.deepEqual(plain(td), [
+    ["Rydd boden", "overdue", "Forfalt i går"],
+    ["Bytt lyspære i gangen", "soon", ""],
+  ]);
+  assert.equal(row("todo:todo.husarbeid:t1").uid, "t1");
+  const m = buildModel(hass, { todo_lists: [{ entity: "todo.husarbeid", show_undated: false }] }, NOW, ext);
+  assert.deepEqual(plain(m.items.filter((i) => i.kind === "todo").map((i) => i.title)), ["Rydd boden", "Støvsug bilen"]);
+});
+
+test("dates: yearly birthday with age, a passed deadline is overdue, far ones hidden", () => {
+  const b = row("date:input_datetime.berit_bursdag");
+  assert.equal(b.title, "Berit har bursdag");
+  assert.equal(b.sub, "I morgen, 40 år");
+  assert.deepEqual(Array.from(b.assignees), ["person.berit"]);
+  const eu = row("date:input_datetime.eu_kontroll");
+  assert.equal(eu.title, "EU-kontroll");
+  assert.equal(eu.urgency, "overdue");
+  assert.equal(eu.sub, "Forfalt for 2 dager siden");
+  assert.equal(row("date:sensor.neste_service"), undefined);
+  // the birthday after it has passed this year: next year, a year older
+  const later = new Date(2026, 10, 25);
+  const m = buildModel(hass, { dates: [{ entity: "input_datetime.berit_bursdag", yearly: true, days_ahead: 400 }] }, later);
+  const next = m.items.find((i) => i.kind === "date");
+  assert.equal(next.due, "2027-11-20");
+  assert.equal(next.age, 41);
+});
+
+test("everything sorts together: overdue, today (timed after untimed), soon (undated to-dos last)", () => {
+  assert.deepEqual(Array.from(full.items, (i) => i.id), [
+    "sensor.soverom_1_lexmark_c3326dw_bytt_blekk_eller_toner_cyan",
+    "sensor.stue_xiaomi_smart_pet_food_feeder_bytt_filter",
+    "sensor.torketrommel_rens_av_kondensator", // due 16 Nov
+    "date:input_datetime.eu_kontroll", // 17 Nov
+    "todo:todo.husarbeid:t2",
+    "appliance:vaskemaskin",
+    "event:calendar.familie:f3:2026-11-16",
+    "sensor.soppel_innsamling_mat_farlig_avfall",
+    "sensor.tommekalender_papp_papir",
+    "event:calendar.familie:f1:2026-11-19T18:00:00+01:00",
+    "date:input_datetime.berit_bursdag",
+    "event:calendar.bursdager:b1:20261121", // 21 Nov, "Cecilie" before "Rengjøre"
+    "sensor.stue_vannfontene_rengjore_fontene_og_skylle_filter",
+    "sensor.ecovent_rens_filter_sov_4",
+    "todo:todo.husarbeid:t1",
+  ]);
+});
+
+test("localDate reads dates, naive datetimes and timestamps", () => {
+  assert.equal(localDate("2026-11-19"), "2026-11-19");
+  assert.equal(localDate("2026-11-19 23:30:00"), "2026-11-19");
+  assert.equal(localDate("2026-11-19T23:30:00+00:00"), "2026-11-20"); // 00:30 in Oslo
+  assert.equal(localDate("10:00:00"), null);
+  assert.equal(localDate("unknown"), null);
+});
+
+// ---- Spare parts in the done dialog
+
+test("parts a completion books, resolved on the owning object", () => {
+  const p = partsForTask(objectsResponse, "sensor.stue_xiaomi_smart_pet_food_feeder_bytt_filter");
+  assert.deepEqual(JSON.parse(JSON.stringify(p)), [
+    { name: "Xiaomi filter", quantity: 1, unit: "", stock: 3 },
+    { name: "Tørkemiddel", quantity: 2, unit: "poser", stock: 7.5 },
+  ]);
+  assert.deepEqual(Array.from(partsForTask(objectsResponse, "sensor.lager_tork")), []);
+  assert.deepEqual(Array.from(partsForTask(objectsResponse, "sensor.ukjent")), []);
+  assert.deepEqual(Array.from(partsForTask(undefined, "sensor.ukjent")), []);
 });

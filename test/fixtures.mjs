@@ -108,3 +108,70 @@ export const config = {
     },
   ],
 };
+
+// ---- Calendars, to-do lists and dates (shapes as /api/calendars and todo/item/list return them)
+
+Object.assign(states, {
+  "calendar.bursdager": { entity_id: "calendar.bursdager", state: "off", last_updated: "2026-11-19T00:00:00+01:00", attributes: { friendly_name: "Bursdager" } },
+  "calendar.familie": { entity_id: "calendar.familie", state: "off", last_updated: "2026-11-19T00:00:00+01:00", attributes: { friendly_name: "Familie" } },
+  "todo.husarbeid": { entity_id: "todo.husarbeid", state: "3", last_updated: "2026-11-19T09:00:00+01:00", attributes: { friendly_name: "Husarbeid" } },
+  "input_datetime.berit_bursdag": { entity_id: "input_datetime.berit_bursdag", state: "1986-11-20", attributes: { friendly_name: "Berit bursdag", has_date: true, has_time: false } },
+  "input_datetime.eu_kontroll": { entity_id: "input_datetime.eu_kontroll", state: "2026-11-17 00:00:00", attributes: { friendly_name: "EU-kontroll", has_date: true, has_time: true } },
+  "sensor.neste_service": { entity_id: "sensor.neste_service", state: "2027-03-01", attributes: { friendly_name: "Neste service", device_class: "date" } },
+});
+
+export const ext = {
+  events: {
+    "calendar.bursdager": [
+      { summary: "Cecilie 12 år", start: { date: "2026-11-21" }, end: { date: "2026-11-22" }, uid: "b1", recurrence_id: "20261121" },
+      { summary: "Farmor", start: { date: "2026-12-24" }, end: { date: "2026-12-25" }, uid: "b2" }, // beyond days_ahead
+    ],
+    "calendar.familie": [
+      { summary: "Foreldremøte", start: { dateTime: "2026-11-19T18:00:00+01:00" }, end: { dateTime: "2026-11-19T19:30:00+01:00" }, uid: "f1" },
+      { summary: "Tannlege", start: { dateTime: "2026-11-19T08:00:00+01:00" }, end: { dateTime: "2026-11-19T08:30:00+01:00" }, uid: "f2" }, // over
+      { summary: "Høstferie", start: { date: "2026-11-16" }, end: { date: "2026-11-21" }, uid: "f3" }, // ongoing, all day
+    ],
+  },
+  todos: {
+    "todo.husarbeid": [
+      { uid: "t1", summary: "Bytt lyspære i gangen", status: "needs_action" },
+      { uid: "t2", summary: "Rydd boden", status: "needs_action", due: "2026-11-18" },
+      { uid: "t3", summary: "Støvsug bilen", status: "needs_action", due: "2026-11-30" }, // beyond days_ahead
+      { uid: "t4", summary: "Kjøp lim", status: "completed" },
+    ],
+  },
+};
+
+export const sourcesConfig = {
+  calendars: [
+    { entity: "calendar.bursdager", days_ahead: 14 },
+    { entity: "calendar.familie", name: "Familien" },
+  ],
+  todo_lists: [{ entity: "todo.husarbeid", days_ahead: 7 }],
+  dates: [
+    { entity: "input_datetime.berit_bursdag", name: "Berit har bursdag", yearly: true, persons: ["person.berit"] },
+    { entity: "input_datetime.eu_kontroll" },
+    { entity: "sensor.neste_service" }, // far ahead: hidden
+  ],
+};
+
+// What maintenance_supporter/objects returns (compact), trimmed to what the card reads.
+export const objectsResponse = {
+  objects: [
+    {
+      entry_id: "e_feeder",
+      object: { name: "Smart Pet Food Feeder" },
+      tasks: [
+        { id: "t_filter", name: "Bytt filter", sensor_entity_id: "sensor.stue_xiaomi_smart_pet_food_feeder_bytt_filter",
+          consumes_parts: [{ part_id: "p_filter", quantity: 1 }, { part_id: "p_desiccant", entry_id: "e_shelf", quantity: 2 }] },
+      ],
+      parts: [{ id: "p_filter", name: "Xiaomi filter", stock: 3 }],
+    },
+    {
+      entry_id: "e_shelf",
+      object: { name: "Lager" },
+      tasks: [{ id: "t_x", name: "Tørk", sensor_entity_id: "sensor.lager_tork" }],
+      parts: [{ id: "p_desiccant", name: "Tørkemiddel", unit: "poser", stock: 7.5 }],
+    },
+  ],
+};
