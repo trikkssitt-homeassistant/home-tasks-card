@@ -2,8 +2,7 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*"
+    tags: ["v*"]
 
 permissions:
   contents: write
@@ -13,15 +12,25 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm run check && npm test
-      - name: Check that the tag matches CARD_VERSION
+
+      - name: Verify tag matches package.json
         run: |
-          v=$(grep -oP 'CARD_VERSION = "\K[^"]+' dist/home-tasks-card.js)
-          [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "Tag ${GITHUB_REF_NAME} != CARD_VERSION $v"; exit 1; }
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/home-tasks-card.js
-          generate_release_notes: true
+          PKG="v$(node -p "JSON.parse(require('fs').readFileSync('package.json','utf8')).version")"
+          if [ "$PKG" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json ($PKG)"
+            exit 1
+          fi
+
+      - run: npm run check
+      - run: npm test
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/home-tasks-card.js \
+            --verify-tag --generate-notes
